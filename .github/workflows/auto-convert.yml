@@ -4,8 +4,8 @@ on:
   push:
     paths:
       - 'cn_domain-extra.list'
-  schedule:
-    - cron: '0 3 * * *'
+  #schedule:
+  #  - cron: '0 3 * * *'
   workflow_dispatch:
 
 permissions:  # ← 新加这几行：开启 write 权限（解决 403）
