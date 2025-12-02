@@ -1,28 +1,32 @@
-name: 更新 mrs（永不翻车终极版）
+name: 自动转换 list → mrs
 
 on:
+  push:
+    paths:
+      - 'cn_domain-extra.list'
+      - 'proxy-extra.list'
   workflow_dispatch:
     inputs:
       target:
-        description: '选择要更新的规则集'
+        description: '选择要转换哪个'
         required: true
         type: choice
-        default: all
+        default: both
         options:
-          - all
-          - cn_domain-extra
-          - proxy
-          - apple
+          - both              # 两个都转（默认）
+          - cn_domain-extra   # 只转国内直连
+          - proxy-extra       # 只转代理规则
 
 permissions:
   contents: write
 
 jobs:
-  download-kernel:
+  convert:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: 下载 Clash Meta 内核
+
+      - name: 下载 Clash Meta 内核（永不404）
         run: |
           URL="https://github.com/MetaCubeX/mihomo/releases/download/v1.19.17/mihomo-linux-amd64-v1.19.17.gz"
           wget -q "$URL" || wget -q "https://github.com/MetaCubeX/mihomo/releases/download/v1.19.17/mihomo-linux-amd64-compatible-v1.19.17.gz"
@@ -30,62 +34,51 @@ jobs:
           gzip -d "$FILENAME"
           chmod +x "${FILENAME%.gz}"
           mv "${FILENAME%.gz}" clash_meta
-      - uses: actions/upload-artifact@v4
-        with:
-          name: clash_meta
-          path: clash_meta
 
-  convert-and-push:
-    needs: download-kernel
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - rule: cn_domain-extra
-            list: cn_domain-extra.list
-            mrs: cn_domain-extra.mrs
-          - rule: proxy
-            list: proxy.list
-            mrs: proxy.mrs
-          - rule: apple
-            list: apple.list
-            mrs: apple.mrs
-          # 以后加新规则就在这里加就行
-
-    if: github.event.inputs.target == 'all' || github.event.inputs.target == '${{ matrix.rule }}'
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: clash_meta
-
-      - run: chmod +x clash_meta
-
-      - name: 生成 ${{ matrix.mrs }}
-        id: convert
+      # ============ 生成 cn_domain-extra.mrs（智能容错）============
+      - name: 生成 cn_domain-extra.mrs
+        if: inputs.target == 'both' || inputs.target == 'cn_domain-extra'
         run: |
-          if [ -f "${{ matrix.list }}" ]; then
-            echo "正在转换 ${{ matrix.list }} → ${{ matrix.mrs }}"
-            ./clash_meta convert-ruleset domain text "${{ matrix.list }}" "${{ matrix.mrs }}"
-            echo "converted=true" >> $GITHUB_OUTPUT
+          if [ -f cn_domain-extra.list ]; then
+            ./clash_meta convert-ruleset domain text cn_domain-extra.list cn_domain-extra.mrs
+            echo "cn_domain-extra.mrs 生成成功"
           else
-            echo "跳过：${{ matrix.list }} 不存在（正常）"
+            echo "cn_domain-extra.list 不存在，已跳过（正常）"
           fi
 
-      # 终极神器：彻底解决显示 workflow 文件名问题
-      - name: 提交更新（永别 .github/workflows/xxx.yml）
-        if: steps.convert.outputs.converted == 'true'
-        uses: stefanzweifel/git-auto-commit-action@v5
-        with:
-          commit_message: "chore: update ${{ matrix.mrs }} $(date -u '+%Y-%m-%d %H:%M')"
-          file_pattern: ${{ matrix.mrs }}
-          push_options: --force  # 可选：确保一定推上去
+      # ============ 生成 proxy-extra.mrs（智能容错）============
+      - name: 生成 proxy-extra.mrs
+        if: inputs.target == 'both' || inputs.target == 'proxy-extra'
+        run: |
+          if [ -f proxy-extra.list ]; then
+            ./clash_meta convert-ruleset domain text proxy-extra.list proxy-extra.mrs
+            echo "proxy-extra.mrs 生成成功"
+          else
+            echo "proxy-extra.list 不存在，已跳过（正常）"
+          fi
 
-  nothing-to-do:
-    needs: [download-kernel, convert-and-push]
-    if: always() && needs.convert-and-push.result == 'skipped'
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo "一个 .list 文件都没找到，啥也没干～（正常）"
+      # ============ 统一提交（完美显示文件名+时间）============
+      - name: 提交所有生成的 mrs 文件
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 检查并提交 cn
+          if [ -f cn_domain-extra.mrs ]; then
+            git add -f cn_domain-extra.mrs
+            git commit -m "chore: auto update cn_domain-extra.mrs $(date -u +%Y-%m-%d\ %H:%M)" || true
+          fi
+
+          # 检查并提交 proxy-extra
+          if [ -f proxy-extra.mrs ]; then
+            git add -f proxy-extra.mrs
+            git commit -m "chore: auto update proxy-extra.mrs $(date -u +%Y-%m-%d\ %H:%M)" || true
+          fi
+
+          # 只要有任意一个提交了就 push
+          if git log -1 --pretty=%B | grep -q "chore: auto update"; then
+            git push origin main
+            echo "已成功推送更新"
+          else
+            echo "没有文件需要提交"
+          fi
