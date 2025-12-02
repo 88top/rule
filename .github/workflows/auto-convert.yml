@@ -14,18 +14,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 下载最新 Clash Meta 内核（自动识别文件名，永不 404）
+      - name: 下载最新 Clash Meta 内核（一锤定音版：用 jq 解析 API，优先 alpha 否则 stable）
         run: |
-          # 用 GitHub API 自动抓最新 alpha 版（优先），没有就用 stable
-          URL=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
-            | grep "browser_download_url.*linux.*x86_64.*alpha.*gz" \
-            | cut -d '"' -f 4 | head -1)
+          # 用 GitHub API 抓最新 release 的所有 Linux x86_64 gz assets
+          ASSETS=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest | jq -r '.assets[] | select(.name | contains("linux") and contains("x86_64") and endswith(".gz")) | .browser_download_url')
+          
+          # 优先找 alpha 版（如果有）
+          ALPHA_URL=$(echo "$ASSETS" | grep -i "alpha" | head -1)
+          if [ -n "$ALPHA_URL" ]; then
+            URL="$ALPHA_URL"
+            echo "找到 alpha 版: $URL"
+          else
+            # 否则取第一个 stable gz
+            URL=$(echo "$ASSETS" | head -1)
+            echo "使用 stable 版: $URL"
+          fi
           
           if [ -z "$URL" ]; then
-            echo "未找到 alpha 版，改用 stable 版"
-            URL=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
-              | grep "browser_download_url.*linux.*x86_64.*gz" \
-              | cut -d '"' -f 4 | head -1)
+            echo "❌ 没有找到任何 Linux x86_64 gz 文件，退出"
+            exit 1
           fi
           
           echo "正在下载: $URL"
@@ -34,16 +41,22 @@ jobs:
           gzip -d "$FILENAME"
           chmod +x "${FILENAME%.gz}"
           mv "${FILENAME%.gz}" clash_meta
-          echo "Clash Meta 下载并准备完成"
+          echo "✅ Clash Meta 下载完成: $FILENAME"
 
       - name: 转换 list → mrs（官方 convert-ruleset 命令）
         run: |
           ./clash_meta convert-ruleset domain text cn_domain-extra.list cn_domain-extra.mrs
+          echo "✅ 转换完成，mrs 文件大小: $(wc -l < cn_domain-extra.mrs) 行"
 
       - name: 提交生成的 mrs 文件
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add cn_domain-extra.mrs
-          git diff --quiet && echo "无变化，跳过提交" || git commit -m "chore: auto update cn_domain-extra.mrs $(date -u +%Y-%m-%d\ %H:%M\ UTC)"
-          git push || echo "Push 失败（可能无变化）"
+          if git diff --quiet; then
+            echo "无变化，跳过提交"
+          else
+            git commit -m "chore: auto update cn_domain-extra.mrs $(date -u +%Y-%m-%d\ %H:%M\ UTC)"
+            git push
+            echo "✅ 提交成功"
+          fi
