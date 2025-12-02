@@ -3,10 +3,10 @@ name: 自动转换 cn_domain-extra.list → cn_domain-extra.mrs
 on:
   push:
     paths:
-      - 'cn_domain-extra.list'   # 你更新源文件时自动触发
+      - 'cn_domain-extra.list'
   schedule:
     - cron: '0 3 * * *'          # 每天 UTC 3:00（北京时间 11:00）自动跑一次
-  workflow_dispatch:             # 支持手动点按钮触发
+  workflow_dispatch:             # 支持手动触发
 
 jobs:
   convert:
@@ -14,14 +14,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 下载最新 Clash Meta 内核（含 convert-ruleset 命令）
+      - name: 下载最新 Clash Meta 内核（自动识别文件名，永不 404）
         run: |
-          wget -q https://github.com/MetaCubeX/mihomo/releases/latest/download/mihomo-linux-amd64-alpha.gz
-          gzip -d mihomo-linux-amd64-alpha.gz
-          chmod +x mihomo-linux-amd64-alpha
-          mv mihomo-linux-amd64-alpha clash_meta
+          # 用 GitHub API 自动抓最新 alpha 版（优先），没有就用 stable
+          URL=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
+            | grep "browser_download_url.*linux.*x86_64.*alpha.*gz" \
+            | cut -d '"' -f 4 | head -1)
+          
+          if [ -z "$URL" ]; then
+            echo "未找到 alpha 版，改用 stable 版"
+            URL=$(curl -s https://api.github.com/repos/MetaCubeX/mihomo/releases/latest \
+              | grep "browser_download_url.*linux.*x86_64.*gz" \
+              | cut -d '"' -f 4 | head -1)
+          fi
+          
+          echo "正在下载: $URL"
+          wget -q "$URL"
+          FILENAME=$(basename "$URL")
+          gzip -d "$FILENAME"
+          chmod +x "${FILENAME%.gz}"
+          mv "${FILENAME%.gz}" clash_meta
+          echo "Clash Meta 下载并准备完成"
 
-      - name: 执行官方转换命令（和你路由器本地完全一样）
+      - name: 转换 list → mrs（官方 convert-ruleset 命令）
         run: |
           ./clash_meta convert-ruleset domain text cn_domain-extra.list cn_domain-extra.mrs
 
@@ -30,5 +45,5 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add cn_domain-extra.mrs
-          git diff --quiet && echo "无变化" || git commit -m "Auto update cn_domain-extra.mrs $(date -u +'%Y-%m-%d %H:%M UTC')"
-          git push
+          git diff --quiet && echo "无变化，跳过提交" || git commit -m "chore: auto update cn_domain-extra.mrs $(date -u +%Y-%m-%d\ %H:%M\ UTC)"
+          git push || echo "Push 失败（可能无变化）"
