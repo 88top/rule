@@ -1,4 +1,5 @@
 name: 自动转换 list → mrs
+
 on:
   push:
     paths:
@@ -12,16 +13,21 @@ on:
         type: choice
         default: both
         options:
-          - both # 两个都转（默认）
-          - cn_domain-extra # 只转国内直连
-          - proxy-extra # 只转代理规则
+          - both      # 两个都转（默认）
+          - cn_domain-extra   # 只转国内直连
+          - proxy-extra       # 只转代理规则
+
 permissions:
   contents: write
+
 jobs:
   convert:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 确保能拿到历史 hash 文件
+
       - name: 下载 Clash Meta 内核（永不404）
         run: |
           URL="https://github.com/MetaCubeX/mihomo/releases/download/v1.19.17/mihomo-linux-amd64-v1.19.17.gz"
@@ -30,84 +36,97 @@ jobs:
           gzip -d "$FILENAME"
           chmod +x "${FILENAME%.gz}"
           mv "${FILENAME%.gz}" clash_meta
-      # ============ 生成 cn_domain-extra.mrs（带验证）============
+
+      # ============ 生成 cn_domain-extra.mrs ============
       - name: 生成 cn_domain-extra.mrs
         if: inputs.target == 'both' || inputs.target == 'cn_domain-extra'
         run: |
           if [ -f cn_domain-extra.list ]; then
-            # 前 hash
-            if [ -f cn_domain-extra.mrs ]; then
-              PRE_HASH=$(sha256sum cn_domain-extra.mrs | cut -d' ' -f1)
-              PRE_SIZE=$(stat -c%s cn_domain-extra.mrs 2>/dev/null || echo 0)
-              PRE_MTIME=$(stat -c%Y cn_domain-extra.mrs 2>/dev/null || echo 0)
-              echo "预覆盖: hash=$PRE_HASH, size=$PRE_SIZE, mtime=$PRE_MTIME"
-            else
-              echo "无现有 mrs 文件"
-            fi
+            echo "开始转换 cn_domain-extra.list → cn_domain-extra.mrs"
             ./clash_meta convert-ruleset domain text cn_domain-extra.list cn_domain-extra.mrs
-            # 后 hash
-            POST_HASH=$(sha256sum cn_domain-extra.mrs | cut -d' ' -f1)
-            POST_SIZE=$(stat -c%s cn_domain-extra.mrs)
-            POST_MTIME=$(stat -c%Y cn_domain-extra.mrs)
-            echo "覆盖成功: hash=$POST_HASH, size=$POST_SIZE, mtime=$POST_MTIME"
-            if [ "$PRE_HASH" = "$POST_HASH" ]; then
-              echo "内容未变（稳定），但已覆盖"
-            else
-              echo "内容已更新"
-            fi
+            echo "cn_domain-extra.mrs 生成完成"
           else
-            echo "cn_domain-extra.list 不存在，已跳过（正常）"
+            echo "cn_domain-extra.list 不存在，跳过生成"
           fi
-      # ============ 生成 proxy-extra.mrs（带验证）============
+
+      # ============ 生成 proxy-extra.mrs ============
       - name: 生成 proxy-extra.mrs
         if: inputs.target == 'both' || inputs.target == 'proxy-extra'
         run: |
           if [ -f proxy-extra.list ]; then
-            # 前 hash
-            if [ -f proxy-extra.mrs ]; then
-              PRE_HASH=$(sha256sum proxy-extra.mrs | cut -d' ' -f1)
-              PRE_SIZE=$(stat -c%s proxy-extra.mrs 2>/dev/null || echo 0)
-              PRE_MTIME=$(stat -c%Y proxy-extra.mrs 2>/dev/null || echo 0)
-              echo "预覆盖: hash=$PRE_HASH, size=$PRE_SIZE, mtime=$PRE_MTIME"
-            else
-              echo "无现有 mrs 文件"
-            fi
+            echo "开始转换 proxy-extra.list → proxy-extra.mrs"
             ./clash_meta convert-ruleset domain text proxy-extra.list proxy-extra.mrs
-            # 后 hash
-            POST_HASH=$(sha256sum proxy-extra.mrs | cut -d' ' -f1)
-            POST_SIZE=$(stat -c%s proxy-extra.mrs)
-            POST_MTIME=$(stat -c%Y proxy-extra.mrs)
-            echo "覆盖成功: hash=$POST_HASH, size=$POST_SIZE, mtime=$POST_MTIME"
-            if [ "$PRE_HASH" = "$POST_HASH" ]; then
-              echo "内容未变（稳定），但已覆盖"
-            else
-              echo "内容已更新"
-            fi
+            echo "proxy-extra.mrs 生成完成"
           else
-            echo "proxy-extra.list 不存在，已跳过（正常）"
+            echo "proxy-extra.list 不存在，跳过生成"
           fi
-      # ============ 提交 + 时间戳强制更新（带验证）============
-      - name: 提交所有生成的 mrs 文件 + 时间戳更新
+
+      # ============ 智能提交：只有真正变化才 push ============
+      - name: 智能提交（仅当 mrs 内容变化时才真正推送）
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          TIMESTAMP=$(date -u +%Y-%m-%d\ %H:%M)
+
+          TIMESTAMP=$(date -u +"%Y-%m-%d %H:%M")
           TARGET="${{ inputs.target }}"
-          # cn: 总是 commit（时间戳更新）
+
+          CHANGED=0   # 是否有实质内容变化
+
+          # 检查 cn_domain-extra.mrs
           if [ -f cn_domain-extra.mrs ]; then
-            git add -f cn_domain-extra.mrs
-            git commit -m "chore: update cn_domain-extra.mrs $TIMESTAMP (覆盖确认: 已执行转换)" || true
-            echo "cn mrs 已 commit（时间戳更新）"
+            NEW_HASH=$(sha256sum cn_domain-extra.mrs | cut -d' ' -f1)
+            HASH_FILE=".git/cn_domain-extra.mrs.hash"
+
+            if [ -f "$HASH_FILE" ]; then
+              OLD_HASH=$(cat "$HASH_FILE")
+              if [ "$OLD_HASH" != "$NEW_HASH" ]; then
+                echo "cn_domain-extra.mrs 内容已更新"
+                CHANGED=1
+              else
+                echo "cn_domain-extra.mrs 内容无变化"
+              fi
+            else
+              echo "首次生成 cn_domain-extra.mrs"
+              CHANGED=1
+            fi
+
+            echo "$NEW_HASH" > "$HASH_FILE"
+            git add cn_domain-extra.mrs
           fi
-          # proxy: 总是 commit（时间戳更新）
+
+          # 检查 proxy-extra.mrs
           if [ -f proxy-extra.mrs ]; then
-            git add -f proxy-extra.mrs
-            git commit -m "chore: update proxy-extra.mrs $TIMESTAMP (覆盖确认: 已执行转换)" || true
-            echo "proxy mrs 已 commit（时间戳更新）"
+            NEW_HASH=$(sha256sum proxy-extra.mrs | cut -d' ' -f1)
+            HASH_FILE=".git/proxy-extra.mrs.hash"
+
+            if [ -f "$HASH_FILE" ]; then
+              OLD_HASH=$(cat "$HASH_FILE")
+              if [ "$OLD_HASH" != "$NEW_HASH" ]; then
+                echo "proxy-extra.mrs 内容已更新"
+                CHANGED=1
+              else
+                echo "proxy-extra.mrs 内容无变化"
+              fi
+            else
+              echo "首次生成 proxy-extra.mrs"
+              CHANGED=1
+            fi
+
+            echo "$NEW_HASH" > "$HASH_FILE"
+            git add proxy-extra.mrs
           fi
-          # 心跳
+
+          # 总是更新心跳文件（仅用于本地记录）
           echo "{\"last_run\": \"$TIMESTAMP\", \"target\": \"$TARGET\"}" > last-run.json
-          git add -f last-run.json
-          git commit -m "chore: workflow heartbeat $TIMESTAMP (target: $TARGET)" || true
-          git push origin main
-          echo "推送完成: 时间戳 $TIMESTAMP (target: $TARGET)"
+          git add last-run.json
+
+          # 只有真正有变化才 commit + push
+          if [ $CHANGED -eq 1 ]; then
+            git commit -m "chore: update ruleset(s) $TIMESTAMP (target: $TARGET)"
+            git push origin main
+            echo "检测到规则内容变更，已提交并推送"
+          else
+            git commit -m "chore: workflow heartbeat $TIMESTAMP (no change, target: $TARGET)" || true
+            echo "无实质内容变化，仅记录本地心跳（未推送）"
+            echo "仓库保持安静，完美！"
+          fi
