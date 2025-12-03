@@ -50,33 +50,32 @@ jobs:
           else
             echo "proxy-extra.list 不存在，已跳过（正常）"
           fi
-      # ============ 提交所有生成的 mrs 文件 + 心跳更新（优化版）============
-      - name: 提交所有生成的 mrs 文件 + 心跳更新
+      # ============ 提交所有生成的 mrs 文件 + 强制时间戳更新（新版）============
+      - name: 提交所有生成的 mrs 文件 + 强制时间戳更新
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # 处理 cn_domain-extra.mrs（仅变化时 commit）
-          if [ -f cn_domain-extra.mrs ] && ! git diff --quiet -- cn_domain-extra.mrs; then
-            git add -f cn_domain-extra.mrs
-            git commit -m "chore: update cn_domain-extra.mrs $(date -u +%Y-%m-%d %H:%M)"
-            echo "已 commit cn_domain-extra.mrs"
-          else
-            echo "cn_domain-extra.mrs 无变化或不存在，跳过"
-          fi
-          # 处理 proxy-extra.mrs（仅变化时 commit）
-          if [ -f proxy-extra.mrs ] && ! git diff --quiet -- proxy-extra.mrs; then
-            git add -f proxy-extra.mrs
-            git commit -m "chore: update proxy-extra.mrs $(date -u +%Y-%m-%d %H:%M)"
-            echo "已 commit proxy-extra.mrs"
-          else
-            echo "proxy-extra.mrs 无变化或不存在，跳过"
-          fi
-          # 心跳：总是更新 last-run.json（记录最新运行时间）
           TIMESTAMP=$(date -u +%Y-%m-%d\ %H:%M)
           TARGET="${{ inputs.target }}"
+          CHANGES=""
+          # 处理 cn_domain-extra.mrs（总是 commit，时间戳更新）
+          if [ -f cn_domain-extra.mrs ]; then
+            git add -f cn_domain-extra.mrs
+            git commit -m "chore: update cn_domain-extra.mrs $TIMESTAMP (even if no content change)" || true
+            CHANGES+="cn_domain-extra.mrs "
+            echo "已 commit cn_domain-extra.mrs (时间戳更新)"
+          fi
+          # 处理 proxy-extra.mrs（总是 commit，时间戳更新）
+          if [ -f proxy-extra.mrs ]; then
+            git add -f proxy-extra.mrs
+            git commit -m "chore: update proxy-extra.mrs $TIMESTAMP (even if no content change)" || true
+            CHANGES+="proxy-extra.mrs "
+            echo "已 commit proxy-extra.mrs (时间戳更新)"
+          fi
+          # 心跳可选（如果想保留）
           echo "{\"last_run\": \"$TIMESTAMP\", \"target\": \"$TARGET\"}" > last-run.json
           git add -f last-run.json
           git commit -m "chore: workflow heartbeat $TIMESTAMP (target: $TARGET)" || true
-          # 总是 push（心跳确保有变更）
+          # 总是 push
           git push origin main
-          echo "已推送：心跳时间 $TIMESTAMP (target: $TARGET)"
+          echo "已推送：$CHANGES 心跳时间 $TIMESTAMP (target: $TARGET)"
