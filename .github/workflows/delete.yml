@@ -1,20 +1,43 @@
-name: Cleanup workflow runs
-on:
-  schedule:
-    - cron: '0 0 * * 0'
-  workflow_dispatch:
+name: Cleanup workflow runs (Manual)
+on: workflow_dispatch
 
 jobs:
   cleanup:
     runs-on: ubuntu-latest
     steps:
-      - name: Cleanup old runs
-        uses: Mattraks/delete-workflow-runs@v2
-        with:
-          token: ${{ secrets.AUTH_PAT }}
-          repository: ${{ github.repository }}
-          # 只保留最近的5个运行，删除其他的
-          keep_minimum_runs: 5
-          keep_maximum_runs: 0  # 0表示无上限
-          delete_workflow_pattern: '.*'
-          dry_run: false
+      - name: Cleanup all workflow runs
+        run: |
+          echo "正在清理工作流运行记录..."
+          
+          # 安装 GitHub CLI
+          type -p gh >/dev/null || curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null
+          sudo apt update && sudo apt install gh -y
+          
+          # 设置认证
+          echo "${{ secrets.AUTH_PAT }}" | gh auth login --with-token
+          
+          # 获取所有工作流
+          workflows=$(gh api repos/${{ github.repository }}/actions/workflows --paginate | jq -r '.workflows[].id')
+          
+          for workflow_id in $workflows; do
+            echo "处理工作流 ID: $workflow_id"
+            
+            # 获取该工作流的所有运行（按时间倒序）
+            runs=$(gh api repos/${{ github.repository }}/actions/workflows/$workflow_id/runs --paginate \
+              --jq '.workflow_runs | sort_by(.created_at) | reverse | .[].id')
+            
+            # 计数器
+            count=0
+            
+            for run_id in $runs; do
+              ((count++))
+              if [ $count -gt 3 ]; then
+                echo "删除运行: $run_id (超出保留数量)"
+                gh api -X DELETE repos/${{ github.repository }}/actions/runs/$run_id
+                sleep 0.5  # 避免速率限制
+              else
+                echo "保留运行: $run_id (第 $count 个)"
+              fi
+            done
+          done
