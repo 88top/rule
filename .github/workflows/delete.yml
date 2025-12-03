@@ -14,3 +14,4 @@ jobs:
           token: ${{ secrets.AUTH_PAT }}
           repository: ${{ github.repository }}
           retain_days: 0
+          ignore_current_run: true  # ← 忽略当前运行，不删除自己
