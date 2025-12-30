@@ -5,9 +5,9 @@ on:
   workflow_dispatch:
     inputs:
       keep_days:
-        description: "保留最近多少天（0=全部清理，默认7）"
+        description: "保留最近多少天（0=全部清理，默认0）"
         required: false
-        default: "7"
+        default: "0"
       repository:
         description: "要清理的仓库（格式：owner/repo，留空为当前仓库）"
         required: false
@@ -44,11 +44,11 @@ jobs:
           TARGET_REPO: ${{ steps.set-repo.outputs.repository }}
         run: |
           # 设置默认值
-          : "${KEEP_DAYS:=7}"
+          : "${KEEP_DAYS:=0}"
           : "${EXCLUDE_CURRENT:=true}"
           
           echo "🔧 参数配置："
-          echo "  - 保留天数: $KEEP_DAYS"
+          echo "  - 保留天数: $KEEP_DAYS (0=全部清理)"
           echo "  - 排除当前运行: $EXCLUDE_CURRENT"
           echo "  - 目标仓库: $TARGET_REPO"
           
@@ -180,7 +180,7 @@ jobs:
           echo "📋 清理报告" >> $GITHUB_STEP_SUMMARY
           echo "---" >> $GITHUB_STEP_SUMMARY
           echo "**目标仓库**: ${{ steps.set-repo.outputs.repository }}" >> $GITHUB_STEP_SUMMARY
-          echo "**保留天数**: ${{ github.event.inputs.keep_days || 7 }}" >> $GITHUB_STEP_SUMMARY
+          echo "**保留天数**: ${{ github.event.inputs.keep_days || 0 }}" >> $GITHUB_STEP_SUMMARY
           echo "**排除当前运行**: ${{ github.event.inputs.exclude_current || 'true' }}" >> $GITHUB_STEP_SUMMARY
           echo "**触发方式**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
