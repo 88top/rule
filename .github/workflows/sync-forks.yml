@@ -2,19 +2,34 @@ name: Sync Multiple Repositories
 
 on:
   schedule:
-    # 每天北京时间 03:00 和 15:00 自动运行，默认同步所有fork仓库
+    # 每天北京时间 03:00 和 15:00 自动运行
     - cron: '0 19 * * *'  # UTC 19:00 = 北京时间次日 03:00
     - cron: '0 7 * * *'   # UTC 07:00 = 北京时间当天 15:00
   workflow_dispatch:
     inputs:
       repositories:
         description: |
-          要同步的仓库（格式：owner/repo，多个用逗号分隔）
-          留空：仅同步当前仓库
-          输入 'all'：同步所有fork仓库
-          默认：空（仅当前仓库）
+          要同步的仓库：
+          留空 - 仅同步当前仓库
+          all  - 同步所有fork仓库
+          指定 - owner/repo,owner2/repo2
         required: false
         default: ""
+
+# ========================================
+# 必须配置的 Secret：
+# 1. 创建 Personal Access Token (PAT)：
+#    - 访问 GitHub → Settings → Developer settings → Personal access tokens
+#    - 生成 token，选择权限：repo (Full control of private repositories)
+#    - 选择 "No expiration"（无期限）
+#    
+# 2. 在仓库中配置 Secret：
+#    - 进入仓库 → Settings → Secrets and variables → Actions
+#    - 新建 Secret，名称：AUTH_PAT，值：粘贴 PAT
+#    
+# 3. 注意：GITHUB_TOKEN 只能访问当前仓库
+#    使用 AUTH_PAT 才能跨仓库操作
+# ========================================
 
 permissions:
   contents: write
@@ -24,10 +39,26 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
+    - name: 检查 AUTH_PAT 配置
+      run: |
+        if [ -z "${{ secrets.AUTH_PAT }}" ]; then
+          echo "❌ 错误：未配置 AUTH_PAT Secret"
+          echo ""
+          echo "请按照以下步骤配置："
+          echo "1. 访问 https://github.com/settings/tokens"
+          echo "2. 创建 Personal Access Token (PAT)"
+          echo "3. 权限选择：repo (Full control)"
+          echo "4. 在仓库 Settings → Secrets → Actions 中添加"
+          echo "5. 名称：AUTH_PAT，值：粘贴 PAT"
+          exit 1
+        else
+          echo "✅ AUTH_PAT 已配置"
+        fi
+        
     - name: 安装依赖
       run: |
         sudo apt-get update
-        sudo apt-get install -y jq curl
+        sudo apt-get install -y jq curl git
         
     - name: 确定同步模式
       id: determine-mode
@@ -71,34 +102,48 @@ jobs:
         ALL_FORK_REPOS=""
         
         while true; do
+          echo "获取第 $page 页..."
           RESPONSE=$(curl -s -H "Authorization: token $GH_TOKEN" \
-                        "https://api.github.com/user/repos?per_page=100&page=$page&affiliation=owner&sort=full_name")
+                        "https://api.github.com/user/repos?per_page=100&page=$page&type=all")
           
-          # 提取fork仓库
-          FORK_REPOS=$(echo "$RESPONSE" | jq -r '.[] | select(.fork == true) | .full_name' | tr '\n' ',')
-          
-          if [ -z "$FORK_REPOS" ] || [ "$FORK_REPOS" = "" ]; then
+          # 检查API响应
+          if echo "$RESPONSE" | jq 'type' 2>/dev/null | grep -q "array"; then
+            # 提取fork仓库
+            FORK_REPOS=$(echo "$RESPONSE" | jq -r '.[] | select(.fork == true) | .full_name' | tr '\n' ',')
+            
+            if [ -z "$FORK_REPOS" ]; then
+              echo "没有更多fork仓库"
+              break
+            fi
+            
+            ALL_FORK_REPOS="${ALL_FORK_REPOS}${FORK_REPOS}"
+            REPO_COUNT=$(echo "$FORK_REPOS" | tr ',' '\n' | wc -l)
+            echo "第 $page 页找到 $REPO_COUNT 个fork仓库"
+            
+            page=$((page + 1))
+            
+            if [ $page -gt 5 ]; then
+              echo "⚠️ 已获取最多 500 个仓库"
+              break
+            fi
+            
+            sleep 1
+          else
+            echo "API 响应异常"
+            echo "$RESPONSE"
             break
           fi
-          
-          ALL_FORK_REPOS="${ALL_FORK_REPOS}${FORK_REPOS}"
-          page=$((page + 1))
-          
-          echo "📊 已获取 $(( (page-1) * 100 )) 个仓库..."
-          
-          if [ $page -gt 10 ]; then
-            echo "⚠️ 已获取 1000 个仓库，如需更多请调整限制"
-            break
-          fi
-          
-          sleep 0.5
         done
         
-        ALL_FORK_REPOS=${ALL_FORK_REPOS%,}
-        REPO_COUNT=$(echo "$ALL_FORK_REPOS" | tr ',' '\n' | wc -l)
-        
-        echo "fork_repositories=$ALL_FORK_REPOS" >> $GITHUB_OUTPUT
-        echo "✅ 共找到 $REPO_COUNT 个fork仓库"
+        if [ -n "$ALL_FORK_REPOS" ]; then
+          ALL_FORK_REPOS=${ALL_FORK_REPOS%,}
+          TOTAL_COUNT=$(echo "$ALL_FORK_REPOS" | tr ',' '\n' | wc -l)
+          echo "fork_repositories=$ALL_FORK_REPOS" >> $GITHUB_OUTPUT
+          echo "✅ 共找到 $TOTAL_COUNT 个fork仓库"
+        else
+          echo "fork_repositories=" >> $GITHUB_OUTPUT
+          echo "⚠️ 未找到任何fork仓库"
+        fi
         
     - name: 准备仓库列表
       id: prepare-repos
@@ -112,7 +157,12 @@ jobs:
         if [ "$MODE" = "all" ]; then
           # 使用所有fork仓库
           FINAL_REPOS="${{ steps.get-all-fork-repos.outputs.fork_repositories }}"
-          echo "🚀 将同步所有fork仓库 ($FINAL_REPOS)"
+          if [ -z "$FINAL_REPOS" ]; then
+            echo "⚠️ 未找到fork仓库，同步当前仓库"
+            FINAL_REPOS="${{ github.repository }}"
+          else
+            echo "🚀 将同步所有fork仓库"
+          fi
         elif [ "$MODE" = "current" ]; then
           # 仅当前仓库
           FINAL_REPOS="$REPOS_INPUT"
@@ -127,6 +177,8 @@ jobs:
         FINAL_REPOS=$(echo "$FINAL_REPOS" | tr -d ' ' | sed 's/,,*/,/g' | sed 's/^,//' | sed 's/,$//')
         
         echo "repositories=$FINAL_REPOS" >> $GITHUB_OUTPUT
+        REPO_COUNT=$(echo "$FINAL_REPOS" | tr ',' '\n' | wc -l)
+        echo "repo_count=$REPO_COUNT" >> $GITHUB_OUTPUT
         
     - name: 同步仓库
       env:
@@ -152,6 +204,11 @@ jobs:
           echo "========================================"
           echo "🔄 同步仓库 ($((SYNC_SUCCESS + SYNC_SKIP + SYNC_FAILED + 1))/${#REPO_ARRAY[@]}): $FORK_REPO"
           echo "========================================"
+          
+          # 跳过空值
+          if [ -z "$FORK_REPO" ]; then
+            continue
+          fi
           
           # 1. 获取fork仓库的上游信息
           echo "📡 获取仓库信息..."
@@ -188,7 +245,7 @@ jobs:
           
           # 5. 添加上游远程
           echo "🔗 添加上游仓库..."
-          git remote add upstream "https://github.com/$PARENT_REPO.git"
+          git remote add upstream "https://github.com/$PARENT_REPO.git" 2>/dev/null || true
           
           # 6. 获取所有上游分支
           echo "📡 获取上游分支..."
@@ -238,7 +295,9 @@ jobs:
             # 推送到fork仓库
             echo "  推送到 $FORK_REPO..."
             if ! git push origin "$BRANCH" 2>/dev/null; then
-              echo "  ❌ 推送失败"
+              echo "  ❌ 推送失败，尝试强制推送"
+              git push --force origin "$BRANCH" 2>/dev/null && \
+                echo "  ✅ 强制推送成功" || echo "  ❌ 强制推送失败"
             else
               echo "  ✅ 推送成功"
             fi
@@ -259,27 +318,61 @@ jobs:
         echo "  ⏭️ 跳过: $SYNC_SKIP"
         echo "  ❌ 失败: $SYNC_FAILED"
         
+        # 设置输出
+        echo "sync_success=$SYNC_SUCCESS" >> $GITHUB_OUTPUT
+        echo "sync_skip=$SYNC_SKIP" >> $GITHUB_OUTPUT
+        echo "sync_failed=$SYNC_FAILED" >> $GITHUB_OUTPUT
+        
     - name: 生成报告
       if: always()
       env:
         MODE: ${{ steps.determine-mode.outputs.mode }}
-        SYNC_COUNT: ${{ fromJSON(steps.prepare-repos.outputs.repositories != '' && '[' + steps.prepare-repos.outputs.repositories + ']' || '[]') && length(fromJSON('[' + steps.prepare-repos.outputs.repositories + ']')) || 0 }}
+        REPO_COUNT: ${{ steps.prepare-repos.outputs.repo_count }}
+        SYNC_SUCCESS: ${{ steps.sync-repositories.outputs.sync_success || 0 }}
+        SYNC_SKIP: ${{ steps.sync-repositories.outputs.sync_skip || 0 }}
+        SYNC_FAILED: ${{ steps.sync-repositories.outputs.sync_failed || 0 }}
       run: |
         echo "## 📊 仓库同步报告" >> $GITHUB_STEP_SUMMARY
         echo "" >> $GITHUB_STEP_SUMMARY
         echo "**同步时间:** $(date '+%Y-%m-%d %H:%M:%S')" >> $GITHUB_STEP_SUMMARY
         echo "**触发方式:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
         echo "**同步模式:** $MODE" >> $GITHUB_STEP_SUMMARY
-        echo "**目标仓库数:** $SYNC_COUNT 个" >> $GITHUB_STEP_SUMMARY
+        echo "**目标仓库数:** $REPO_COUNT 个" >> $GITHUB_OUTPUT
         echo "" >> $GITHUB_STEP_SUMMARY
         
-        if ${{ job.status == 'success' }}; then
-          echo "**状态:** ✅ 同步任务执行成功" >> $GITHUB_STEP_SUMMARY
+        if [ "${{ job.status }}" = "success" ]; then
+          echo "**状态:** ✅ 同步任务执行完成" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "> 下一次定时同步时间：" >> $GITHUB_STEP_SUMMARY
+          echo "### 📈 同步统计" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 状态 | 数量 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ✅ 成功 | $SYNC_SUCCESS |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⏭️ 跳过 | $SYNC_SKIP |" >> $GITHUB_STEP_SUMMARY
+          echo "| ❌ 失败 | $SYNC_FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "| 📦 总计 | $((SYNC_SUCCESS + SYNC_SKIP + SYNC_FAILED)) |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          echo "> 🕐 下一次定时同步时间：" >> $GITHUB_STEP_SUMMARY
           echo "> - 北京时间 03:00（UTC 前一天 19:00）" >> $GITHUB_STEP_SUMMARY
           echo "> - 北京时间 15:00（UTC 当天 07:00）" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "> ⚠️ 注意：定时任务自动同步所有fork仓库" >> $GITHUB_STEP_SUMMARY
+          echo "> 如需手动同步特定仓库，请手动触发并指定仓库" >> $GITHUB_STEP_SUMMARY
         else
-          echo "**状态:** ⚠️ 同步任务执行过程中出现问题" >> $GITHUB_STEP_SUMMARY
+          echo "**状态:** ❌ 同步任务执行失败" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "请查看详细日志了解错误信息。" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔧 常见问题" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "1. **AUTH_PAT 未配置**" >> $GITHUB_STEP_SUMMARY
+          echo "   - 检查仓库 Settings → Secrets → Actions 中是否有 AUTH_PAT" >> $GITHUB_STEP_SUMMARY
+          echo "   - PAT 需要 `repo` 权限" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "2. **PAT 权限不足**" >> $GITHUB_STEP_SUMMARY
+          echo "   - 重新生成 PAT，确保选择 `repo` (Full control)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "3. **仓库访问权限**" >> $GITHUB_STEP_SUMMARY
+          echo "   - 确认 PAT 对目标仓库有写入权限" >> $GITHUB_STEP_SUMMARY
         fi
