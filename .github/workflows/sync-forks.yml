@@ -1,102 +1,126 @@
 name: Sync Fork from Upstream
 
 on:
-  workflow_dispatch:  # 手动触发
-    inputs:
-      sources:
-        description: "源仓库列表（owner/repo，逗号分隔；留空=当前仓库源仓库；输入 'all'=所有fork源仓库）"
-        required: false
-        default: ""
   schedule:
-    - cron: '30 * * * *'  # 每小时的第30分钟运行（即源仓库更新后约半小时）
+    # 每天北京时间 03:00 和 15:00 自动运行（UTC 时间转换）
+    - cron: '0 19 * * *'  # UTC 19:00 = 北京时间 次日 03:00（跨天转换正确）
+    - cron: '0 7 * * *'   # UTC 07:00 = 北京时间 当天 15:00（转换正确）
+  workflow_dispatch:
+    inputs:
+      upstream_repos:
+        description: |
+          要同步的源仓库 (格式: owner/repo)
+          多个用逗号分隔，留空为当前仓库
+          输入 'all' 使用默认配置
+        required: false
+        default: 'all'
+      force_sync:
+        description: '强制同步（忽略时间检查）'
+        type: boolean
+        default: false
+
+# 授予工作流必要的权限，用于推送代码到仓库
+permissions:
+  contents: write
+  pull-requests: read
 
 jobs:
-  sync:
+  sync-fork-branches:
     runs-on: ubuntu-latest
     steps:
-      - name: 生成 Token（防日志泄露）
-        id: gen-token
-        run: echo "token=${{ secrets.SYNC_PAT }}" >> $GITHUB_OUTPUT
-
-      - name: Checkout 当前仓库
+      # 步骤1：检出当前 Fork 仓库的代码
+      - name: Checkout current fork repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          token: ${{ steps.gen-token.outputs.token }}
+          fetch-depth: 0  # 完整检出所有历史和分支，必须配置否则无法同步多分支
 
-      - name: 设置 Git 配置
+      # 步骤2：配置 Git 身份（用于提交同步记录）
+      - name: Configure Git user
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: 获取源仓库列表
-        id: get-sources
-        env:
-          GH_TOKEN: ${{ steps.gen-token.outputs.token }}
+      # 步骤3：定义默认上游仓库（核心配置：你的源仓库）
+      - name: Set default upstream repositories (all)
+        id: set-upstream
         run: |
-          INPUT="${{ inputs.sources }}"
+          # 配置默认上游仓库（替换为你的目标源仓库，多个用逗号分隔）
+          # 此处默认值为你提供的 OpenClash 仓库，可根据需要修改
+          DEFAULT_UPSTREAM="timeflysoon/OpenClash"
           
-          if [[ "$INPUT" == "all" ]]; then
-            echo "获取所有 fork 的源仓库..."
-            SOURCES=$(gh api "/repos/${{ github.repository }}/forks" --paginate -q '.[].parent.full_name' | sort -u | paste -sd "," -)
-          elif [[ -z "$INPUT" ]]; then
-            echo "使用当前仓库的源仓库..."
-            SOURCES=$(gh api "/repos/${{ github.repository }}" -q '.parent.full_name // empty')
+          # 获取手动输入的 upstream_repos 参数
+          INPUT_UPSTREAM="${{ github.event.inputs.upstream_repos }}"
+          
+          # 处理参数逻辑：all -> 使用默认仓库，留空 -> 当前仓库，否则使用输入值
+          if [[ "$INPUT_UPSTREAM" == "all" ]]; then
+            UPSTREAM_REPOS="$DEFAULT_UPSTREAM"
+          elif [[ -z "$INPUT_UPSTREAM" ]]; then
+            UPSTREAM_REPOS="${{ github.repository }}"
           else
-            SOURCES=$(echo "$INPUT" | sed 's/ //g' | tr ',' '\n' | sort -u | paste -sd "," -)
+            UPSTREAM_REPOS="$INPUT_UPSTREAM"
           fi
           
-          if [[ -z "$SOURCES" ]]; then
-            echo "未找到源仓库，退出"
-            exit 0
-          fi
-          
-          echo "sources=$SOURCES" >> $GITHUB_OUTPUT
-          echo "将同步源仓库：$SOURCES"
+          # 输出到环境变量，供后续步骤使用
+          echo "UPSTREAM_REPOS=$UPSTREAM_REPOS" >> $GITHUB_ENV
 
-      - name: 同步所有源仓库的所有分支和标签
-        env:
-          GH_TOKEN: ${{ steps.gen-token.outputs.token }}
+      # 步骤4：循环同步每个上游仓库的所有分支
+      - name: Sync all branches from upstream repositories
         run: |
-          IFS=',' read -ra SOURCE_ARRAY <<< "${{ steps.get-sources.outputs.sources }}"
+          # 分割上游仓库列表（逗号分隔）
+          IFS=',' read -ra UPSTREAM_LIST <<< "$UPSTREAM_REPOS"
           
-          for SOURCE in "${SOURCE_ARRAY[@]}"; do
-            echo ""
-            echo "============================================"
-            echo "正在从 $SOURCE 同步到 ${{ github.repository }}"
-            echo "============================================"
+          for UPSTREAM in "${UPSTREAM_LIST[@]}"; do
+            # 去除仓库名前后空格（防止输入格式错误）
+            UPSTREAM=$(echo "$UPSTREAM" | xargs)
+            echo "======================================"
+            echo "Starting to sync from upstream: $UPSTREAM"
+            echo "======================================"
             
-            # 添加或更新 upstream remote
-            if git remote get-url upstream >/dev/null 2>&1; then
-              git remote set-url upstream "https://x-access-token:$GH_TOKEN@github.com/$SOURCE.git"
+            # 1. 添加上游仓库远程地址（如果已存在则更新）
+            UPSTREAM_REMOTE="upstream-$UPSTREAM"
+            if git remote | grep -q "$UPSTREAM_REMOTE"; then
+              git remote set-url "$UPSTREAM_REMOTE" "https://github.com/$UPSTREAM.git"
             else
-              git remote add upstream "https://x-access-token:$GH_TOKEN@github.com/$SOURCE.git"
+              git remote add "$UPSTREAM_REMOTE" "https://github.com/$UPSTREAM.git"
             fi
             
-            # 获取上游所有更新
-            git fetch upstream --tags --prune --prune-tags --force
+            # 2. 从上游仓库拉取所有分支和标签（完整同步）
+            git fetch --all --tags --prune "$UPSTREAM_REMOTE"
             
-            # 获取所有上游分支
-            UPSTREAM_BRANCHES=$(git for-each-ref --format='%(refname:short)' refs/remotes/upstream/ | sed 's|^upstream/||')
+            # 3. 获取上游仓库的所有分支列表（排除 HEAD 和远程默认分支）
+            UPSTREAM_BRANCHES=$(git branch -r | grep "$UPSTREAM_REMOTE/" | grep -v HEAD | sed "s|$UPSTREAM_REMOTE/||g")
             
-            UPDATED=0
+            # 4. 循环同步每个分支
             for BRANCH in $UPSTREAM_BRANCHES; do
-              if git show-ref --quiet --heads "$BRANCH"; then
-                # 本地已有分支，强制更新
-                git push origin "upstream/$BRANCH:refs/heads/$BRANCH" --force
-                ((UPDATED++))
+              echo "--------------------------------------"
+              echo "Syncing branch: $BRANCH"
+              echo "--------------------------------------"
+              
+              # a. 切换到该分支（如果本地不存在则创建）
+              if git rev-parse --verify "$BRANCH" >/dev/null 2>&1; then
+                git checkout "$BRANCH"
               else
-                # 新分支，直接推送
-                git push origin "upstream/$BRANCH:refs/heads/$BRANCH"
-                ((UPDATED++))
+                git checkout -b "$BRANCH" "$UPSTREAM_REMOTE/$BRANCH"
+              fi
+              
+              # b. 合并上游分支（如果需要强制同步，使用 reset 替代 merge）
+              if [[ "${{ github.event.inputs.force_sync }}" == "true" ]]; then
+                git reset --hard "$UPSTREAM_REMOTE/$BRANCH"
+                echo "Force synced branch $BRANCH with upstream (reset --hard)"
+              else
+                git merge --ff-only "$UPSTREAM_REMOTE/$BRANCH"
+                echo "Fast-forward merged branch $BRANCH with upstream"
+              fi
+              
+              # c. 推送同步后的分支到当前 Fork 仓库（强制推送仅在手动开启 force_sync 时使用）
+              if [[ "${{ github.event.inputs.force_sync }}" == "true" ]]; then
+                git push origin "$BRANCH" --force
+              else
+                git push origin "$BRANCH"
               fi
             done
-            
-            # 同步所有标签
-            git push origin --tags --force
-            
-            echo "✅ 完成同步，更新 $UPDATED 个分支"
           done
           
-          echo ""
-          echo "🎉 所有源仓库同步完成！"
+          echo "======================================"
+          echo "All branches sync completed successfully!"
+          echo "======================================"
