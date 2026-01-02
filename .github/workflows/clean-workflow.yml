@@ -11,7 +11,7 @@ on:
       repositories:
         description: "要清理的仓库（格式：owner/repo，多个用逗号分隔，留空为当前仓库，输入 'all' 清理所有仓库）"
         required: false
-        default: ""
+        default: "all"
 
 jobs:
   cleanup:
